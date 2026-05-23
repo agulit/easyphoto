@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QKeyEvent, QPainter, QPixmap, QTransform, QWheelEvent
+
+from seephoto.adjustments import AdjustParams, apply_adjustments
 from PySide6.QtWidgets import (
     QGraphicsPixmapItem,
     QGraphicsScene,
@@ -55,14 +57,18 @@ class ImageCanvas(QGraphicsView):
 
         self._zoom = 1.0
         self._pixmap: QPixmap | None = None
+        self._source_pixmap: QPixmap | None = None
         self._base_pixmap: QPixmap | None = None
+        self._adjust_params = AdjustParams()
         self._rotation = 0
         self._fit_mode = True
         self._original_size: tuple[int, int] = (0, 0)
 
     def clear_image(self) -> None:
         self._pixmap = None
+        self._source_pixmap = None
         self._base_pixmap = None
+        self._adjust_params = AdjustParams()
         self._rotation = 0
         self._item.setPixmap(QPixmap())
         self._scene.setSceneRect(0, 0, 0, 0)
@@ -70,12 +76,45 @@ class ImageCanvas(QGraphicsView):
         self._zoom = 1.0
 
     def set_pixmap(
-        self, pixmap: QPixmap, original_size: tuple[int, int] | None = None
+        self,
+        pixmap: QPixmap,
+        original_size: tuple[int, int] | None = None,
+        *,
+        reset_view: bool = True,
     ) -> None:
+        self._source_pixmap = pixmap
+        self._adjust_params = AdjustParams()
         self._base_pixmap = pixmap
         self._rotation = 0
         self._original_size = original_size or (pixmap.width(), pixmap.height())
+        if reset_view:
+            # 切换图片时恢复「适应窗口」，不沿用上一张的缩放比例
+            self._fit_mode = True
+            self._zoom = 1.0
         self._apply_pixmap(pixmap)
+
+    def source_pixmap(self) -> QPixmap | None:
+        return self._source_pixmap
+
+    def adjust_params(self) -> AdjustParams:
+        return self._adjust_params
+
+    def set_adjust_params(
+        self, params: AdjustParams, *, rendered: QPixmap | None = None
+    ) -> None:
+        if not self._source_pixmap or self._source_pixmap.isNull():
+            return
+        self._adjust_params = params
+        if rendered is not None and not rendered.isNull():
+            base = rendered
+        elif params.is_default():
+            base = self._source_pixmap
+        else:
+            base = apply_adjustments(self._source_pixmap, params)
+            if base is None:
+                base = self._source_pixmap
+        self._base_pixmap = base
+        self._apply_pixmap(self._transformed(self._base_pixmap, self._rotation))
 
     def rotation_angle(self) -> int:
         return self._rotation
@@ -94,6 +133,8 @@ class ImageCanvas(QGraphicsView):
 
     def set_display_pixmap(self, pixmap: QPixmap) -> None:
         """Replace visible pixmap (e.g. after crop) and keep rotation cleared."""
+        self._source_pixmap = pixmap
+        self._adjust_params = AdjustParams()
         self._base_pixmap = pixmap
         self._rotation = 0
         self._original_size = (pixmap.width(), pixmap.height())

@@ -174,23 +174,22 @@ QWidget#FilmstripInner {
 }
 
 QWidget#ThumbCell {
-    background: #1e1e2a;
-    border: 2px solid transparent;
+    background: transparent;
+    border: none;
     border-radius: 8px;
 }
 
-QWidget#ThumbCell[selected="true"] {
-    background: #252538;
-    border: 2px solid #5c6cff;
+QWidget#ThumbCell[selected="true"] QLabel#ThumbCaption {
+    color: #b8c8ff;
 }
 
-QWidget#ThumbCell:hover {
-    background: #2a2a40;
-    border: 2px solid #4a58c8;
+QWidget#ThumbCell:hover QLabel#ThumbPreview {
+    background: #16161e;
 }
 
 QLabel#ThumbPreview {
-    background: #121218;
+    background: #0e0e14;
+    border: none;
     border-radius: 4px;
     color: #606078;
     font-size: 11px;

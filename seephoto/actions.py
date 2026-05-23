@@ -13,21 +13,29 @@ from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 def pixmap_to_pil(pixmap: QPixmap) -> Image.Image:
-    img = pixmap.toImage().convertToFormat(QImage.Format.Format_RGB888)
-    w, h = img.width(), img.height()
-    ptr = img.bits()
-    ptr.setsize(h * w * 3)
-    data = bytes(ptr)
-    return Image.frombytes("RGB", (w, h), data)
+    """QPixmap → PIL（兼容 PySide6 memoryview，无 setsize）。"""
+    qimg = pixmap.toImage().convertToFormat(QImage.Format.Format_RGBA8888)
+    w, h = qimg.width(), qimg.height()
+    bpl = qimg.bytesPerLine()
+    ptr = qimg.constBits()
+    nbytes = bpl * h
+    raw = bytes(ptr)[:nbytes]
+    if bpl == w * 4:
+        return Image.frombytes("RGBA", (w, h), raw).convert("RGB")
+    rows = bytearray()
+    for y in range(h):
+        row = raw[y * bpl : y * bpl + w * 4]
+        rows.extend(row)
+    return Image.frombytes("RGBA", (w, h), bytes(rows)).convert("RGB")
 
 
 def pil_to_pixmap(img: Image.Image) -> QPixmap:
-    if img.mode != "RGB":
-        img = img.convert("RGB")
-    w, h = img.size
-    data = img.tobytes("raw", "RGB")
-    qimg = QImage(data, w, h, w * 3, QImage.Format.Format_RGB888)
-    return QPixmap.fromImage(qimg)
+    """PIL → QPixmap（copy 避免缓冲区被回收）。"""
+    rgba = img.convert("RGBA")
+    w, h = rgba.size
+    data = rgba.tobytes("raw", "RGBA")
+    qimg = QImage(data, w, h, w * 4, QImage.Format.Format_RGBA8888)
+    return QPixmap.fromImage(qimg.copy())
 
 
 def crop_pixmap(pixmap: QPixmap, rect: QRect) -> QPixmap:
@@ -103,6 +111,36 @@ def _print_via_shell(pixmap: QPixmap, parent) -> bool:
         return False
     except Exception as exc:
         QMessageBox.warning(parent, "打印", f"打印失败: {exc}")
+        return False
+
+
+def reveal_file_in_folder(path: Path, parent=None) -> bool:
+    """在系统文件管理器中打开所在文件夹并选中该文件。"""
+    path = Path(path).resolve()
+    if not path.is_file():
+        if parent is not None:
+            QMessageBox.warning(parent, "易图", f"文件不存在：\n{path}")
+        return False
+    folder = path.parent
+    try:
+        if sys.platform == "win32":
+            import subprocess
+
+            # explorer /select,"完整路径"
+            subprocess.Popen(["explorer", "/select,", str(path)])
+            return True
+        if sys.platform == "darwin":
+            import subprocess
+
+            subprocess.Popen(["open", "-R", str(path)])
+            return True
+        import subprocess
+
+        subprocess.Popen(["xdg-open", str(folder)])
+        return True
+    except Exception as exc:
+        if parent is not None:
+            QMessageBox.warning(parent, "易图", f"无法打开文件夹：{exc}")
         return False
 
 

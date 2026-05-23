@@ -32,6 +32,9 @@ hiddenimports = collect_submodules("rawpy") + [
     "seephoto.actions",
     "seephoto.win_utils",
     "seephoto.about_dialog",
+    "seephoto.shell_register",
+    "seephoto.adjustments",
+    "seephoto.adjust_dialog",
 ]
 
 for pkg in ("rawpy",):

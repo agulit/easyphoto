@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import io
+import os
 from pathlib import Path
 
 from PIL import Image
-from PySide6.QtCore import QEvent, QObject, Qt, QThreadPool, QRunnable, Signal
-from PySide6.QtGui import QPixmap, QWheelEvent
+from PySide6.QtCore import QEvent, QObject, Qt, QThreadPool, QRunnable, QTimer, Signal
+from PySide6.QtGui import QColor, QPainter, QPixmap, QWheelEvent
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -19,9 +20,18 @@ from PySide6.QtWidgets import (
 
 from seephoto.formats import is_raw_path
 
-THUMB_SIZE = 88
-CELL_W = 96
-CELL_H = 104
+THUMB_SIZE = 84
+CAPTION_H = 18
+CELL_MARGIN = 6
+SEL_PAD = 4          # 选中时蓝色底衬露出的边宽
+CELL_W = THUMB_SIZE + CELL_MARGIN * 2
+CELL_H = THUMB_SIZE + SEL_PAD * 2 + 6 + CAPTION_H + CELL_MARGIN * 2
+
+
+def _same_path(a: Path | None, b: Path | None) -> bool:
+    if a is None or b is None:
+        return False
+    return os.path.normcase(str(a.resolve())) == os.path.normcase(str(b.resolve()))
 
 
 def _make_thumbnail(path: Path) -> QPixmap | None:
@@ -99,8 +109,9 @@ class ThumbCell(QWidget):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setContentsMargins(CELL_MARGIN, CELL_MARGIN, CELL_MARGIN, CELL_MARGIN)
         layout.setSpacing(4)
+        layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
 
         self.preview = QLabel()
         self.preview.setObjectName("ThumbPreview")
@@ -111,13 +122,16 @@ class ThumbCell(QWidget):
         self.caption = QLabel(path.name)
         self.caption.setObjectName("ThumbCaption")
         self.caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.caption.setMaximumWidth(CELL_W - 8)
+        self.caption.setFixedHeight(CAPTION_H)
+        self.caption.setMaximumWidth(CELL_W - CELL_MARGIN * 2)
         self.caption.setToolTip(path.name)
         fm = self.caption.fontMetrics()
-        self.caption.setText(fm.elidedText(path.name, Qt.TextElideMode.ElideMiddle, CELL_W - 8))
+        self.caption.setText(
+            fm.elidedText(path.name, Qt.TextElideMode.ElideMiddle, CELL_W - CELL_MARGIN * 2)
+        )
 
         layout.addWidget(self.preview, 0, Qt.AlignmentFlag.AlignHCenter)
-        layout.addWidget(self.caption)
+        layout.addWidget(self.caption, 0, Qt.AlignmentFlag.AlignHCenter)
 
     def set_pixmap(self, pixmap: QPixmap | None) -> None:
         if pixmap and not pixmap.isNull():
@@ -134,9 +148,25 @@ class ThumbCell(QWidget):
             self.preview.setText("RAW" if is_raw_path(self.path) else "?")
 
     def set_selected(self, selected: bool) -> None:
-        self.setProperty("selected", selected)
+        val = "true" if selected else "false"
+        if self.property("selected") == val:
+            return
+        self.setProperty("selected", val)
         self.style().unpolish(self)
         self.style().polish(self)
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        if self.property("selected") == "true":
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            r = self.preview.geometry().adjusted(
+                -SEL_PAD, -SEL_PAD, SEL_PAD, SEL_PAD
+            )
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor("#3d5afe"))
+            p.drawRoundedRect(r, 6, 6)
+        super().paintEvent(event)
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -150,7 +180,7 @@ class ThumbnailStrip(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("Filmstrip")
-        self.setFixedHeight(CELL_H + 16)
+        self.setFixedHeight(CELL_H + 12)
         self.setAcceptDrops(False)
 
         outer = QVBoxLayout(self)
@@ -166,8 +196,8 @@ class ThumbnailStrip(QWidget):
         self._container = QWidget()
         self._container.setObjectName("FilmstripInner")
         self._row = QHBoxLayout(self._container)
-        self._row.setContentsMargins(8, 6, 8, 6)
-        self._row.setSpacing(6)
+        self._row.setContentsMargins(12, 6, 12, 6)
+        self._row.setSpacing(14)
         self._row.addStretch(1)
 
         self._scroll.setWidget(self._container)
@@ -177,7 +207,7 @@ class ThumbnailStrip(QWidget):
         self._scroll.viewport().installEventFilter(self)
 
         self._cells: dict[Path, ThumbCell] = {}
-        self._current: Path | None = None
+        self._current: Path | None = None  # 已 resolve 的路径
         self._thumb_signals = _ThumbSignals()
         self._thumb_signals.ready.connect(self._apply_thumb)
         self._pool = QThreadPool.globalInstance()
@@ -213,14 +243,27 @@ class ThumbnailStrip(QWidget):
         self.setVisible(bool(images))
 
     def set_current(self, path: Path | None) -> None:
-        path = path.resolve() if path else None
-        self._current = path
-        for p, cell in self._cells.items():
-            cell.set_selected(p == path)
-        if path and path in self._cells:
-            self._scroll.ensureWidgetVisible(self._cells[path], 24, 24)
+        """只更新上一个与当前两个格子，避免几百张图时整栏刷新卡顿。"""
+        new_key = path.resolve() if path else None
+        if _same_path(new_key, self._current):
+            return
+
+        if self._current is not None:
+            old_cell = self._cells.get(self._current)
+            if old_cell:
+                old_cell.set_selected(False)
+
+        self._current = new_key
+
+        if new_key is not None:
+            cell = self._cells.get(new_key)
+            if cell:
+                cell.set_selected(True)
+                QTimer.singleShot(0, lambda c=cell: self._scroll.ensureWidgetVisible(c, 20, 20))
 
     def _on_cell_clicked(self, path: Path) -> None:
+        # 先更新选中样式，再加载大图，点击反馈即时
+        self.set_current(path)
         self.image_selected.emit(path)
 
     def _apply_thumb(self, path: Path, pixmap: QPixmap | None) -> None:

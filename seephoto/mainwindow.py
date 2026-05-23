@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, Qt, QThread, Signal, Slot
+from PySide6.QtCore import QEvent, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import (
     QAction,
     QCloseEvent,
@@ -260,7 +260,10 @@ class HintOverlay(DropMixin, QWidget):
 class MainWindow(QMainWindow):
     def __init__(self, initial: Path | None = None) -> None:
         super().__init__()
-        self.setWindowTitle("易图 1.3")
+        from seephoto import APP_NAME, version_short
+
+        self._app_title = f"{APP_NAME} {version_short()}"
+        self.setWindowTitle(self._app_title)
         self.setMinimumSize(960, 640)
         self.resize(1280, 800)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -302,6 +305,17 @@ class MainWindow(QMainWindow):
         self.hint = HintOverlay(self.viewer)
         self.hint.open_file_btn.clicked.connect(self._open_file_dialog)
         self.hint.open_dir_btn.clicked.connect(self._open_dir_dialog)
+
+        self._immersive = False
+        self._fs_hint = QLabel("按 Esc 退出全屏", self.viewer)
+        self._fs_hint.setStyleSheet(
+            "color: rgba(210,210,230,0.9); font-size: 13px; "
+            "background: rgba(0,0,0,0.45); padding: 8px 16px; border-radius: 10px;"
+        )
+        self._fs_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._fs_hint.hide()
+        self._fs_hint.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
         self._position_hint()
 
         self.toolbar.rotate_left.connect(self.canvas.rotate_left)
@@ -310,9 +324,12 @@ class MainWindow(QMainWindow):
         self.toolbar.rotate_right.connect(self._update_status)
         self.toolbar.info_clicked.connect(self._show_properties)
         self.toolbar.crop_clicked.connect(self._crop_image)
+        self.toolbar.adjust_clicked.connect(self._adjust_image)
+        self.toolbar.fullscreen_clicked.connect(self._toggle_immersive)
         self.toolbar.print_clicked.connect(self._print_image)
         self.toolbar.copy_clicked.connect(self._copy_image)
         self.toolbar.save_as_clicked.connect(self._save_image_as)
+        self.toolbar.reveal_folder_clicked.connect(self._reveal_in_folder)
         self.toolbar.delete_clicked.connect(self._delete_image)
 
         self.viewer.prev_clicked.connect(lambda: self._navigate(-1))
@@ -453,8 +470,13 @@ class MainWindow(QMainWindow):
         for label, slot, shortcut in (
             ("打开图片…", self._open_file_dialog, QKeySequence.StandardKey.Open),
             ("打开文件夹…", self._open_dir_dialog, None),
+            ("打开所在文件夹", self._reveal_in_folder, "Ctrl+Shift+E"),
+            (None, None, None),
             ("退出", self.close, QKeySequence.StandardKey.Quit),
         ):
+            if label is None:
+                file_menu.addSeparator()
+                continue
             act = QAction(label, self)
             if shortcut:
                 act.setShortcut(shortcut)
@@ -467,44 +489,50 @@ class MainWindow(QMainWindow):
             ("缩小", self.canvas.zoom_out, "-"),
             ("适应窗口", self.canvas.fit_to_window, "0"),
             ("实际像素", self.canvas.zoom_actual, "1"),
-            ("全屏", self._toggle_fullscreen, "F11"),
+            ("全屏浏览", self._toggle_immersive, "F11"),
         ):
             act = QAction(label, self)
             act.setShortcut(QKeySequence(key))
             act.triggered.connect(slot)
             view_menu.addAction(act)
 
-        nav_menu = bar.addMenu("浏览")
-        for label, delta in (
-            ("上一张", -1),
-            ("下一张",  1),
-        ):
-            act = QAction(label, self)
-            act.triggered.connect(lambda d=delta: self._navigate(d))
-            nav_menu.addAction(act)
-
         img_menu = bar.addMenu("图片")
         for label, slot, key in (
+            ("上一张", lambda: self._navigate(-1), "Left"),
+            ("下一张", lambda: self._navigate(1), "Right"),
+            (None, None, None),
             ("逆时针旋转", self._rotate_left, "Ctrl+,"),
             ("顺时针旋转", self._rotate_right, "Ctrl+."),
             ("图片信息…", self._show_properties, "Ctrl+I"),
+            ("打开所在文件夹", self._reveal_in_folder, "Ctrl+Shift+E"),
+            ("明暗与色调…", self._adjust_image, "Ctrl+Shift+L"),
+            ("重置调色", self._reset_adjustments, None),
             ("裁剪…", self._crop_image, None),
             ("打印…", self._print_image, "Ctrl+P"),
             ("复制", self._copy_image, "Ctrl+C"),
             ("另存为…", self._save_image_as, "Ctrl+Shift+S"),
             ("删除", self._delete_image, "Del"),
         ):
+            if label is None:
+                img_menu.addSeparator()
+                continue
             act = QAction(label, self)
             if key:
                 act.setShortcut(QKeySequence(key))
             act.triggered.connect(slot)
             img_menu.addAction(act)
 
-        # 帮助菜单
         help_menu = bar.addMenu("帮助")
         about_act = QAction("关于 易图…", self)
         about_act.triggered.connect(self._show_about)
         help_menu.addAction(about_act)
+        help_menu.addSeparator()
+        reg_act = QAction("添加到右键菜单", self)
+        reg_act.triggered.connect(self._register_context_menu)
+        help_menu.addAction(reg_act)
+        unreg_act = QAction("从右键菜单移除", self)
+        unreg_act.triggered.connect(self._unregister_context_menu)
+        help_menu.addAction(unreg_act)
 
         return bar
 
@@ -515,10 +543,13 @@ class MainWindow(QMainWindow):
         if vw > 0 and vh > 0:
             self.hint.setGeometry(0, 0, vw, vh)
         self.hint.raise_()
+        if self._immersive and self._fs_hint and self._fs_hint.isVisible():
+            self._show_fs_hint()
 
     def _show_hint(self, show: bool) -> None:
         self.hint.setVisible(show)
-        self.toolbar.setVisible(not show)
+        if not self._immersive:
+            self.toolbar.setVisible(not show)
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if mime_has_urls(event):
@@ -565,6 +596,17 @@ class MainWindow(QMainWindow):
                 self._open_path(images[0])
             else:
                 QMessageBox.information(self, "易图", "该文件夹中没有支持的图片。")
+
+    def _reveal_in_folder(self) -> None:
+        if not self._current or not self._current.is_file():
+            self._status.showMessage("请先打开一张图片", 3000)
+            return
+        from seephoto.actions import reveal_file_in_folder
+
+        if reveal_file_in_folder(self._current, self):
+            self._status.showMessage(
+                f"已在文件夹中定位：{self._current.name}", 3000
+            )
 
     def _open_path_from_strip(self, path: Path) -> None:
         path = Path(path).resolve()
@@ -630,12 +672,22 @@ class MainWindow(QMainWindow):
         *,
         is_preview: bool = False,
     ) -> None:
-        self._current = path.resolve()
+        resolved = path.resolve()
+        same_file = self._current is not None and self._current == resolved
+        self._current = resolved
         self._display_meta = meta
-        self.canvas.set_pixmap(pixmap, (meta.original_width, meta.original_height))
-        self.filmstrip.set_current(self._current)
+        self.canvas.set_pixmap(
+            pixmap,
+            (meta.original_width, meta.original_height),
+            reset_view=not same_file,
+        )
         self._show_hint(False)
-        self.toolbar.show()
+        if not self._immersive:
+            self.toolbar.show()
+            self.filmstrip.show()
+            self._menu_bar.show()
+            self.statusBar().show()
+            self.viewer.set_navigation_visible(len(self._images) > 1)
         self._update_status(is_preview=is_preview)
         self.setWindowTitle(f"{path.name} — 易图")
 
@@ -725,9 +777,11 @@ class MainWindow(QMainWindow):
         pos = f"{idx}/{total}" if total else ""
         rot = self.canvas.rotation_angle()
         rot_str = f"  ·  旋转 {rot}°" if rot else ""
+        adj = self.canvas.adjust_params()
+        adj_str = "  ·  已调色" if not adj.is_default() else ""
         preview_str = "  ·  ⏳ 精解中…" if is_preview else ""
         self._status.showMessage(
-            f"{self._current.name}  ·  {size_str}  ·  {zoom:.0f}%  ·  {raw_tag}{rot_str}  ·  {pos}{preview_str}"
+            f"{self._current.name}  ·  {size_str}  ·  {zoom:.0f}%  ·  {raw_tag}{rot_str}{adj_str}  ·  {pos}{preview_str}"
         )
 
     def _rotate_left(self) -> None:
@@ -743,11 +797,156 @@ class MainWindow(QMainWindow):
         dlg = AboutDialog(self)
         dlg.exec()
 
+    def _register_context_menu(self) -> None:
+        import sys
+
+        if sys.platform != "win32":
+            QMessageBox.information(self, "易图", "右键菜单仅支持 Windows。")
+            return
+        try:
+            from seephoto.shell_register import is_registered, register
+
+            if is_registered():
+                QMessageBox.information(
+                    self, "易图", "右键菜单已注册，在图片文件上右键即可看到「用易图打开」。"
+                )
+                return
+            register()
+            QMessageBox.information(
+                self,
+                "易图",
+                "已添加到右键菜单。\n\n在任意支持的图片文件上右键，选择「用易图打开」即可。",
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "易图", f"注册失败：{exc}")
+
+    def _unregister_context_menu(self) -> None:
+        import sys
+
+        if sys.platform != "win32":
+            return
+        try:
+            from seephoto.shell_register import is_registered, unregister
+
+            if not is_registered():
+                QMessageBox.information(self, "易图", "当前未注册右键菜单。")
+                return
+            unregister()
+            QMessageBox.information(self, "易图", "已从右键菜单移除。")
+        except Exception as exc:
+            QMessageBox.warning(self, "易图", f"移除失败：{exc}")
+
     def _show_properties(self) -> None:
         if not self._current:
             return
         dlg = PropertiesDialog(self._current, self)
         dlg.exec()
+
+    def _reset_adjustments(self) -> None:
+        from seephoto.adjustments import AdjustParams
+
+        if not self.canvas.source_pixmap():
+            self._status.showMessage("请先打开图片", 3000)
+            return
+        self.canvas.set_adjust_params(AdjustParams())
+        self._update_status()
+        self._status.showMessage("已重置调色", 2500)
+
+    def _toggle_immersive(self) -> None:
+        if self._immersive:
+            self._exit_immersive()
+        else:
+            self._enter_immersive()
+
+    def _enter_immersive(self) -> None:
+        pm = self.canvas.current_pixmap()
+        if not pm or pm.isNull():
+            self._status.showMessage("请先打开图片", 3000)
+            return
+        self._immersive = True
+        self._menu_bar.hide()
+        self.toolbar.hide()
+        self.filmstrip.hide()
+        self.statusBar().hide()
+        self.hint.hide()
+        self.viewer.set_navigation_visible(False)
+        self.showFullScreen()
+        self.canvas.fit_to_window()
+        self._show_fs_hint()
+        self.viewer.setFocus()
+
+    def _exit_immersive(self) -> None:
+        if not self._immersive and not self.isFullScreen():
+            return
+        self._immersive = False
+        self._fs_hint.hide()
+        self.showNormal()
+        self._menu_bar.show()
+        if self._current:
+            self.toolbar.show()
+            self.filmstrip.show()
+            self.statusBar().show()
+            self.viewer.set_navigation_visible(len(self._images) > 1)
+        else:
+            self.toolbar.hide()
+            self.filmstrip.hide()
+            self.statusBar().show()
+
+    def _show_fs_hint(self) -> None:
+        self._fs_hint.adjustSize()
+        vw, vh = self.viewer.width(), self.viewer.height()
+        self._fs_hint.move(
+            max(0, (vw - self._fs_hint.width()) // 2),
+            max(0, vh - self._fs_hint.height() - 28),
+        )
+        self._fs_hint.show()
+        self._fs_hint.raise_()
+        QTimer.singleShot(2800, self._fs_hint.hide)
+
+    def _adjust_image(self) -> None:
+        src = self.canvas.source_pixmap()
+        if not src or src.isNull():
+            self._status.showMessage("请先打开图片", 3000)
+            return
+        from seephoto.actions import pil_to_pixmap, pixmap_to_pil
+        from seephoto.adjust_dialog import AdjustDialog
+        from seephoto.adjustments import (
+            AdjustParams,
+            apply_adjustments_pil,
+            downscale_for_preview,
+        )
+
+        backup = self.canvas.adjust_params()
+        full_pil = pixmap_to_pil(src)
+        preview_pil = downscale_for_preview(full_pil, 1200)
+        target = (src.width(), src.height())
+
+        def _render(params: AdjustParams, *, full: bool) -> None:
+            if params.is_default():
+                self.canvas.set_adjust_params(params, rendered=src)
+                return
+            pil = full_pil if full else preview_pil
+            out = apply_adjustments_pil(pil, params)
+            pm = pil_to_pixmap(out)
+            if not full and (pm.width(), pm.height()) != target:
+                pm = pm.scaled(
+                    target[0],
+                    target[1],
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                    if full
+                    else Qt.TransformationMode.FastTransformation,
+                )
+            self.canvas.set_adjust_params(params, rendered=pm)
+
+        dlg = AdjustDialog(backup, self)
+        dlg.params_preview.connect(lambda p: _render(p, full=False))
+        dlg.params_final.connect(lambda p: _render(p, full=True))
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            _render(backup, full=True)
+        else:
+            _render(dlg.result_params(), full=True)
+        self._update_status()
 
     def _crop_image(self) -> None:
         pm = self.canvas.current_pixmap()
@@ -811,14 +1010,8 @@ class MainWindow(QMainWindow):
             self.filmstrip.hide()
             self.toolbar.hide()
             self._show_hint(True)
-            self.setWindowTitle("易图 1.3")
+            self.setWindowTitle(self._app_title)
             self._status.showMessage("已删除", 3000)
-
-    def _toggle_fullscreen(self) -> None:
-        if self.isFullScreen():
-            self.showNormal()
-        else:
-            self.showFullScreen()
 
     def keyPressEvent(self, event) -> None:
         key = event.key()
@@ -840,12 +1033,12 @@ class MainWindow(QMainWindow):
             self.canvas.zoom_actual()
             event.accept()
             return
-        if key == Qt.Key.Key_Escape and self.isFullScreen():
-            self.showNormal()
+        if key == Qt.Key.Key_Escape and self._immersive:
+            self._exit_immersive()
             event.accept()
             return
         if key == Qt.Key.Key_F11:
-            self._toggle_fullscreen()
+            self._toggle_immersive()
             event.accept()
             return
         if key == Qt.Key.Key_Delete:
