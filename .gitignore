@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+*.pyo
+build/
+dist/
+*.spec.bak
+.venv/
+venv/
+.env
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+*.log
+Thumbs.db
+Desktop.ini
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# PyInstaller 临时
+*.manifest
+*.toc
