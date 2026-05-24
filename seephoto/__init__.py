@@ -1,6 +1,6 @@
 """SeePhoto - portable image viewer with RAW support."""
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 APP_NAME = "易图"
 APP_AUTHOR = "llso"
 
